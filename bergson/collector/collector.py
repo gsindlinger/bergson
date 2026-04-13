@@ -164,11 +164,15 @@ class HookCollectorBase(ContextDecorator, ABC):
                 continue
 
             collect_bias = getattr(layer, "bias", None) is not None and include_bias
+            in_features = getattr(layer, LayerAdapter.in_attr(layer))
+            out_features = getattr(layer, LayerAdapter.out_attr(layer))
 
             target_info[name] = (
                 layer.weight.device,
                 layer.weight.shape,
                 collect_bias,
+                in_features,
+                out_features,
             )
         return target_info
 
@@ -226,7 +230,7 @@ class HookCollectorBase(ContextDecorator, ABC):
         )
 
         shapes = {}
-        for name, (_, target_shape, collect_bias) in self.target_info.items():
+        for name, (_, target_shape, collect_bias, *_) in self.target_info.items():
             if name in self.attention_cfgs:
                 attention_cfg = self.attention_cfgs[name]
                 if proj_shape:

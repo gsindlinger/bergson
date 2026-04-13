@@ -25,16 +25,14 @@ class ShardedMul:
     ):
         """Initialize the covariance matrices for activations and gradients."""
 
-        for name, (device, weight_shape, collect_bias) in target_info.items():
+        for name, (device, weight_shape, collect_bias, in_dim, out_dim) in target_info.items():
             # Activation covariance A^T A has shape [in_dim, in_dim]
-            in_dim = weight_shape[1]
             shard_in_dim = in_dim if not self.dist else in_dim // self.world_size
             activation_covariance_dict[name] = torch.zeros(
                 (shard_in_dim, in_dim), device=self.device, dtype=dtype
             )
 
             # Gradient covariance G^T G has shape [out_dim, out_dim]
-            out_dim = weight_shape[0]
             shard_out_dim = out_dim if not self.dist else out_dim // self.world_size
             gradient_covariance_dict[name] = torch.zeros(
                 (shard_out_dim, out_dim), device=self.device, dtype=dtype
