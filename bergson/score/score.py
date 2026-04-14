@@ -38,17 +38,31 @@ from bergson.utils.worker_utils import (
 )
 
 
+def _peek_n_queries(query_path: str) -> int:
+    """Return the number of queries in a gradient index without loading tensors."""
+    with open(Path(query_path) / "info.json") as f:
+        return int(json.load(f)["num_grads"])
+
+
 def get_query_grads(
     score_cfg: ScoreConfig,
+    row_range: tuple[int, int] | None = None,
 ) -> tuple[dict[str, torch.Tensor], PreprocessConfig]:
     """
     Load query gradients from the mmap index and return as a dict of tensors.
 
+    Parameters
+    ----------
+    score_cfg : ScoreConfig
+        Score configuration specifying the query path and target modules.
+    row_range : tuple[int, int] | None
+        If given, load only rows ``[row_range[0], row_range[1])`` from the
+        query index.  Useful for chunked scoring to keep memory bounded.
+
     Returns
     -------
-    tuple[dict[str, torch.Tensor], bool]
-        The query gradients and whether they were already preconditioned
-        (e.g. during a reduce step).
+    tuple[dict[str, torch.Tensor], PreprocessConfig]
+        The query gradients and any preprocessing config embedded in the index.
     """
     query_path = Path(score_cfg.query_path)
     if not query_path.exists():
@@ -82,7 +96,10 @@ def get_query_grads(
     for i, name in enumerate(grad_sizes.keys()):
         if name not in target_modules:
             continue
-        sliced = mmap[:, module_offsets[i] : module_offsets[i + 1]]
+        if row_range is not None:
+            sliced = mmap[row_range[0] : row_range[1], module_offsets[i] : module_offsets[i + 1]]
+        else:
+            sliced = mmap[:, module_offsets[i] : module_offsets[i + 1]]
         if needs_cast:
             grads[name] = torch.from_numpy(sliced.astype(np.float32))
         else:
@@ -126,6 +143,9 @@ def create_scorer(
     dtype: torch.dtype,
     *,
     attribute_tokens: bool = False,
+    row_range: tuple[int, int] | None = None,
+    column_offset: int = 0,
+    total_num_scores: int | None = None,
 ) -> Scorer:
     """Create a Scorer with MemmapScoreWriter for disk-based scoring.
 
@@ -137,8 +157,21 @@ def create_scorer(
     * Normalizes and aggregates (unless already done).
     * Builds an ``index_transform`` closure for per-batch index
       preconditioning in split mode (``unit_normalize=True``).
+
+    Parameters
+    ----------
+    row_range : tuple[int, int] | None
+        If given, load only rows ``[row_range[0], row_range[1])`` from the
+        query index.  Used by chunked scoring to keep memory bounded.
+    column_offset : int
+        Column index at which this scorer starts writing into the output
+        memmap. Used for chunked scoring so each chunk writes directly into
+        its column range of the final file.
+    total_num_scores : int | None
+        Total number of score columns in the output memmap. Defaults to the
+        number of query grads loaded (i.e. the non-chunked case).
     """
-    query_grads, query_preprocess_cfg = get_query_grads(score_cfg)
+    query_grads, query_preprocess_cfg = get_query_grads(score_cfg, row_range=row_range)
 
     # Load preconditioner: H^(-1/2) for split, H^(-1) for one-sided
     preconditioners = get_trackstar_preconditioner(
@@ -199,9 +232,18 @@ def create_scorer(
             data,
             num_queries,
             dtype=dtype,
+            column_offset=column_offset,
+            total_num_scores=total_num_scores,
         )
     else:
-        writer = MemmapSequenceScoreWriter(path, len(data), num_queries, dtype=dtype)
+        writer = MemmapSequenceScoreWriter(
+            path,
+            len(data),
+            num_queries,
+            dtype=dtype,
+            column_offset=column_offset,
+            total_num_scores=total_num_scores,
+        )
 
     return Scorer(
         query_grads=query_grads,
@@ -289,17 +331,47 @@ def score_worker(
         kwargs["batches"] = allocate_batches(
             ds["length"][:], index_cfg.token_batch_size
         )
-        kwargs["scorer"] = create_scorer(
-            index_cfg.partial_run_path,
-            ds,
-            score_cfg,
-            preprocess_cfg,
-            device=score_device,
-            dtype=score_dtype,
-            attribute_tokens=index_cfg.attribute_tokens,
-        )
 
-        collect_gradients(**kwargs)
+        n_queries = _peek_n_queries(score_cfg.query_path)
+        chunk_size = score_cfg.query_chunk_size
+
+        if chunk_size > 0 and n_queries > chunk_size:
+            # Chunked scoring: run one pass per query chunk to bound peak RAM.
+            # The model is evaluated ceil(n_queries / chunk_size) times. Each
+            # chunk writes directly into its column range of the final memmap
+            # — no intermediate files, no merge step.
+            chunks = [
+                (q, min(q + chunk_size, n_queries))
+                for q in range(0, n_queries, chunk_size)
+            ]
+            for q_start, q_end in chunks:
+                kwargs["scorer"] = create_scorer(
+                    index_cfg.partial_run_path,
+                    ds,
+                    score_cfg,
+                    preprocess_cfg,
+                    device=score_device,
+                    dtype=score_dtype,
+                    attribute_tokens=index_cfg.attribute_tokens,
+                    row_range=(q_start, q_end),
+                    column_offset=q_start,
+                    total_num_scores=n_queries,
+                )
+                collect_gradients(**kwargs)
+                # Flush the chunk's writes before the scorer is replaced, so
+                # data is durably on disk even if a later chunk fails.
+                kwargs["scorer"].writer.flush()
+        else:
+            kwargs["scorer"] = create_scorer(
+                index_cfg.partial_run_path,
+                ds,
+                score_cfg,
+                preprocess_cfg,
+                device=score_device,
+                dtype=score_dtype,
+                attribute_tokens=index_cfg.attribute_tokens,
+            )
+            collect_gradients(**kwargs)
     else:
         # Convert each shard to a Dataset then map over its gradients
         buf, shard_id = [], 0

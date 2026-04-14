@@ -494,6 +494,13 @@ class ScoreConfig(Serializable):
     modules: list[str] = field(default_factory=list)
     """Modules to use for the query. If empty, all modules will be used."""
 
+    query_chunk_size: int = 0
+    """When > 0, split the query index into chunks of this many queries and run
+    scoring in multiple passes to bound peak memory.  Useful when the query
+    index is large (e.g. EK-FAC with many per-sentence IVHP vectors).
+    The model is run once per chunk; total wall-time scales linearly with the
+    number of chunks.  0 = load all queries at once (default)."""
+
 
 @dataclass
 class HessianConfig(Serializable):

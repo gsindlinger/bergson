@@ -105,9 +105,21 @@ class MemmapTokenScoreWriter(ScoreWriter):
         *,
         dtype: torch.dtype = torch.float32,
         flush_interval: int = 64,
+        column_offset: int = 0,
+        total_num_scores: int | None = None,
     ):
+        if total_num_scores is None:
+            total_num_scores = num_scores
+        if column_offset + num_scores > total_num_scores:
+            raise ValueError(
+                f"column_offset ({column_offset}) + num_scores ({num_scores}) "
+                f"exceeds total_num_scores ({total_num_scores})"
+            )
+
         self.path = path
         self.num_scores = num_scores
+        self.column_offset = column_offset
+        self.total_num_scores = total_num_scores
         self.dtype = dtype
         self.flush_interval = flush_interval
         self.num_batches_since_flush = 0
@@ -131,7 +143,7 @@ class MemmapTokenScoreWriter(ScoreWriter):
                 str(scores_file_path),
                 dtype=np_dtype,
                 mode="w+",
-                shape=(total_tokens, num_scores),
+                shape=(total_tokens, total_num_scores),
             )
             self.scores[:] = 0
             self.flush()
@@ -142,7 +154,7 @@ class MemmapTokenScoreWriter(ScoreWriter):
                         "attribute_tokens": True,
                         "total_tokens": total_tokens,
                         "num_items": num_items,
-                        "num_scores": num_scores,
+                        "num_scores": total_num_scores,
                         "dtype": np_dtype.name,
                     },
                     f,
@@ -159,19 +171,25 @@ class MemmapTokenScoreWriter(ScoreWriter):
             str(scores_file_path),
             dtype=np_dtype,
             mode="r+",
-            shape=(total_tokens, num_scores),
+            shape=(total_tokens, total_num_scores),
         )
 
     def __call__(self, indices: list[int], scores: torch.Tensor):
-        # scores: [total_valid_in_batch, num_scores]
+        # scores: [total_valid_in_batch, num_scores] — written into columns
+        # [column_offset, column_offset + num_scores) of the file.
         scores_np = tensor_to_numpy(scores.to(dtype=self.dtype).cpu())
+
+        col_start = self.column_offset
+        col_end = col_start + self.num_scores
 
         row = 0
         for idx in indices:
             sl = int(self.num_token_grads[idx])
             buf_start = int(self.offsets[idx])
             buf_end = int(self.offsets[idx + 1])
-            self.scores[buf_start:buf_end] = scores_np[row : row + sl]
+            self.scores[buf_start:buf_end, col_start:col_end] = scores_np[
+                row : row + sl
+            ]
             row += sl
 
         self.num_batches_since_flush += 1
@@ -188,6 +206,12 @@ class MemmapSequenceScoreWriter(ScoreWriter):
     Writes scores to a memory-mapped file on disk.
 
     Supports bfloat16 via ml_dtypes.
+
+    Supports chunked scoring via ``column_offset`` / ``total_num_scores``:
+    the underlying file holds ``total_num_scores`` score columns, and this
+    writer owns columns ``[column_offset, column_offset + num_scores)``.
+    Multiple chunked writers can target the same file across iterations
+    without any post-hoc merging.
     """
 
     def __init__(
@@ -198,9 +222,21 @@ class MemmapSequenceScoreWriter(ScoreWriter):
         *,
         dtype: torch.dtype = torch.float32,
         flush_interval: int = 64,
+        column_offset: int = 0,
+        total_num_scores: int | None = None,
     ):
+        if total_num_scores is None:
+            total_num_scores = num_scores
+        if column_offset + num_scores > total_num_scores:
+            raise ValueError(
+                f"column_offset ({column_offset}) + num_scores ({num_scores}) "
+                f"exceeds total_num_scores ({total_num_scores})"
+            )
+
         self.path = path
         self.num_scores = num_scores
+        self.column_offset = column_offset
+        self.total_num_scores = total_num_scores
         self.dtype = dtype
         self.flush_interval = flush_interval
         self.num_batches_since_flush = 0
@@ -221,7 +257,7 @@ class MemmapSequenceScoreWriter(ScoreWriter):
         names = []
         formats = []
         offsets = []
-        for i in range(num_scores):
+        for i in range(total_num_scores):
             names.append(f"score_{i}")
             formats.append(np_dtype)
             offsets.append(i * aligned_pair_size)
@@ -230,7 +266,7 @@ class MemmapSequenceScoreWriter(ScoreWriter):
             formats.append("bool")
             offsets.append(i * aligned_pair_size + score_size)
 
-        total_bytes = num_scores * aligned_pair_size
+        total_bytes = total_num_scores * aligned_pair_size
         # Round up to the nearest 8 bytes
         itemsize = ((total_bytes + 7) // 8) * 8
 
@@ -254,7 +290,7 @@ class MemmapSequenceScoreWriter(ScoreWriter):
         if rank == 0 and not scores_file_path.exists():
             print(f"Creating new scores file: {scores_file_path}")
 
-            # w+ mode creates a zero-filled file.
+            # w+ mode creates a zero-filled file sized for all columns.
             self.scores = np.memmap(
                 str(scores_file_path),
                 dtype=np.dtype(struct_dtype),  # type: ignore
@@ -267,7 +303,7 @@ class MemmapSequenceScoreWriter(ScoreWriter):
                 json.dump(
                     {
                         "num_items": num_items,
-                        "num_scores": num_scores,
+                        "num_scores": total_num_scores,
                         "dtype": struct_dtype_json,
                     },
                     f,
@@ -285,12 +321,14 @@ class MemmapSequenceScoreWriter(ScoreWriter):
         )
 
     def __call__(self, indices: list[int], scores: torch.Tensor):
-        # scores: [num_indices, num_scores]
+        # scores: [num_indices, num_scores] — written into columns
+        # [column_offset, column_offset + num_scores) of the file.
         scores = scores.to(dtype=self.dtype)
         for i in range(self.num_scores):
+            col = self.column_offset + i
             score_col = tensor_to_numpy(scores[:, i].cpu()).flatten()
-            self.scores[f"score_{i}"][indices] = score_col
-            self.scores[f"written_{i}"][indices] = True
+            self.scores[f"score_{col}"][indices] = score_col
+            self.scores[f"written_{col}"][indices] = True
 
         self.num_batches_since_flush += 1
         if self.num_batches_since_flush >= self.flush_interval:
