@@ -363,6 +363,7 @@ def create_index(
     grad_sizes: dict[str, int],
     dtype: DTypeLike,
     with_structure: bool = True,
+    grad_shapes: dict[str, list[int]] | None = None,
 ) -> np.memmap:
     """Create a memory-mapped file for storing structured gradients
     and persist metadata."""
@@ -390,17 +391,16 @@ def create_index(
             os.fsync(f.fileno())
 
         # Persist metadata for future runs
+        info = {
+            "num_grads": num_grads,
+            "dtype": struct_dtype,
+            "grad_sizes": grad_sizes,
+            "base_dtype": np.dtype(dtype).name,
+        }
+        if grad_shapes is not None:
+            info["grad_shapes"] = grad_shapes
         with (root / "info.json").open("w") as f:
-            json.dump(
-                {
-                    "num_grads": num_grads,
-                    "dtype": struct_dtype,
-                    "grad_sizes": grad_sizes,
-                    "base_dtype": np.dtype(dtype).name,
-                },
-                f,
-                indent=2,
-            )
+            json.dump(info, f, indent=2)
 
     # ── 2. Everyone blocks until the file is definitely there & sized ─────────────
     if dist.is_initialized():

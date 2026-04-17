@@ -69,6 +69,7 @@ class Builder:
         *,
         attribute_tokens: bool = False,
         path: Path | None = None,
+        grad_shapes: dict[str, list[int]] | None = None,
     ):
         self.grad_sizes = grad_sizes
         self.num_items = len(data)
@@ -129,6 +130,7 @@ class Builder:
                     grad_sizes=grad_sizes,
                     dtype=np_dtype,
                     with_structure=False,
+                    grad_shapes=grad_shapes,
                 )
             else:
                 self.grad_buffer = np.zeros(

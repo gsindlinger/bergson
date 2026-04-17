@@ -77,7 +77,9 @@ class GradientCollector(HookCollectorBase):
         self.save_index = self.scorer is None and not self.cfg.skip_index
 
         if self.save_index:
-            grad_sizes = {name: math.prod(s) for name, s in self.shapes().items()}
+            shapes = self.shapes()
+            grad_sizes = {name: math.prod(s) for name, s in shapes.items()}
+            grad_shapes = {name: list(s) for name, s in shapes.items()}
             self.builder = Builder(
                 self.data,
                 grad_sizes,
@@ -85,6 +87,7 @@ class GradientCollector(HookCollectorBase):
                 self.preprocess_cfg,
                 attribute_tokens=self.cfg.attribute_tokens,
                 path=self.cfg.partial_run_path,
+                grad_shapes=grad_shapes,
             )
         else:
             self.builder = None

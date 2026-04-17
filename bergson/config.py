@@ -501,6 +501,15 @@ class ScoreConfig(Serializable):
     The model is run once per chunk; total wall-time scales linearly with the
     number of chunks.  0 = load all queries at once (default)."""
 
+    query_low_rank: int = 0
+    """When > 0, approximate each query gradient matrix (per module) with a
+    rank-``query_low_rank`` truncated SVD before scoring.  This compresses
+    query memory from ``O(n_queries * O * I)`` to ``O(n_queries * (O + I) * r)``
+    per module, enabling many more queries to fit on the GPU at once and
+    reducing or eliminating the need for ``query_chunk_size``.
+    0 = store full query gradients (default).  Requires the query index to
+    contain ``grad_shapes`` metadata (indices built with bergson ≥ v0.10)."""
+
 
 @dataclass
 class HessianConfig(Serializable):

@@ -91,13 +91,16 @@ class InMemoryCollector(HookCollectorBase):
 
         # Create in-memory builder when not scoring
         if self.builder is None and self.scorer is None:
-            grad_sizes = {name: math.prod(s) for name, s in self.shapes().items()}
+            shapes = self.shapes()
+            grad_sizes = {name: math.prod(s) for name, s in shapes.items()}
+            grad_shapes = {name: list(s) for name, s in shapes.items()}
             self.builder = Builder(
                 self.data,
                 grad_sizes,
                 self.save_dtype,
                 self.preprocess_cfg,
                 attribute_tokens=self.cfg.attribute_tokens,
+                grad_shapes=grad_shapes,
             )
 
     def teardown(self) -> None:

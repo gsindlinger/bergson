@@ -47,7 +47,7 @@ def _peek_n_queries(query_path: str) -> int:
 def get_query_grads(
     score_cfg: ScoreConfig,
     row_range: tuple[int, int] | None = None,
-) -> tuple[dict[str, torch.Tensor], PreprocessConfig]:
+) -> tuple[dict[str, torch.Tensor], PreprocessConfig, dict[str, list[int]] | None]:
     """
     Load query gradients from the mmap index and return as a dict of tensors.
 
@@ -61,8 +61,10 @@ def get_query_grads(
 
     Returns
     -------
-    tuple[dict[str, torch.Tensor], PreprocessConfig]
-        The query gradients and any preprocessing config embedded in the index.
+    tuple[dict[str, torch.Tensor], PreprocessConfig, dict[str, list[int]] | None]
+        The query gradients, any preprocessing config embedded in the index,
+        and optionally the per-module weight shapes ``[O, I]`` (``None`` for
+        older indices that lack this metadata).
     """
     query_path = Path(score_cfg.query_path)
     if not query_path.exists():
@@ -75,6 +77,7 @@ def get_query_grads(
         metadata = json.load(f)
         target_modules = metadata["dtype"]["names"]
         grad_sizes = metadata["grad_sizes"]
+        grad_shapes = metadata.get("grad_shapes")
 
     preprocess_path = Path(query_path / "preprocess_config.yaml")
     if preprocess_path.exists():
@@ -97,7 +100,9 @@ def get_query_grads(
         if name not in target_modules:
             continue
         if row_range is not None:
-            sliced = mmap[row_range[0] : row_range[1], module_offsets[i] : module_offsets[i + 1]]
+            sliced = mmap[
+                row_range[0] : row_range[1], module_offsets[i] : module_offsets[i + 1]
+            ]
         else:
             sliced = mmap[:, module_offsets[i] : module_offsets[i + 1]]
         if needs_cast:
@@ -105,7 +110,7 @@ def get_query_grads(
         else:
             grads[name] = torch.from_numpy(sliced.copy())
 
-    return grads, preprocess_cfg
+    return grads, preprocess_cfg, grad_shapes
 
 
 def _make_split_preconditioner(
@@ -171,7 +176,9 @@ def create_scorer(
         Total number of score columns in the output memmap. Defaults to the
         number of query grads loaded (i.e. the non-chunked case).
     """
-    query_grads, query_preprocess_cfg = get_query_grads(score_cfg, row_range=row_range)
+    query_grads, query_preprocess_cfg, grad_shapes = get_query_grads(
+        score_cfg, row_range=row_range
+    )
 
     # Load preconditioner: H^(-1/2) for split, H^(-1) for one-sided
     preconditioners = get_trackstar_preconditioner(
@@ -255,6 +262,8 @@ def create_scorer(
         score_mode=score_cfg.score,
         attribute_tokens=attribute_tokens,
         index_transform=index_transform,
+        low_rank=score_cfg.query_low_rank,
+        grad_shapes=grad_shapes,
     )
 
 
