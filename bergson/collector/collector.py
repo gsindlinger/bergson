@@ -35,6 +35,7 @@ from bergson.gradients import (
     GradientProcessor,
     LayerAdapter,
 )
+from bergson.hessians.ekfac_whitener import EkfacWhitener
 from bergson.utils.logger import get_logger
 from bergson.utils.peft import set_peft_enabled
 from bergson.utils.utils import assert_type
@@ -93,6 +94,13 @@ class HookCollectorBase(ContextDecorator, ABC):
 
     hi: float = float("inf")
     """Upper clamp bound for gradients. May be narrowed in subclass ``setup()``."""
+
+    ekfac_whitener: Optional[EkfacWhitener] = None
+    """Optional EK-FAC whitener. When set, applies H^{-1/2} to per-sample grads
+    in their native [N, O, I] shape before random projection (P-SIFT sketch).
+    For whitened modules, ``a`` is NOT pre-projected in the forward hook, and
+    ``_compute_gradient`` materializes the full outer product before projecting
+    both sides. Only supported for the no-normalizer, no-bias, doc-level path."""
 
     logger = get_logger("HookCollectorBase", level="INFO")
 
@@ -413,7 +421,12 @@ class HookCollectorBase(ContextDecorator, ABC):
 
         # Defer a-projection when bias is included — backward needs full a to
         # compute the outer product before concatenating the bias column.
-        if p is not None and not module._collect_bias:
+        # Also defer when an EK-FAC whitener covers this module: whitening must
+        # happen in the native [N, O, I] shape before projection.
+        whitener_active = (
+            self.ekfac_whitener is not None and self.ekfac_whitener.has_module(name)
+        )
+        if p is not None and not module._collect_bias and not whitener_active:
             a_projection = self.projection(name, p, i, "right", a.device, a.dtype).T
             a = a @ a_projection  # [N, S, I(+1)] @ [I(+1), p] → [N, S, p]
 
@@ -538,8 +551,18 @@ class HookCollectorBase(ContextDecorator, ABC):
             else:
                 bias_grad = None
 
-            # a is projected in forward unless deferred by bias collection
-            if p is not None and not module._collect_bias:
+            whitener_active = (
+                self.ekfac_whitener is not None
+                and self.ekfac_whitener.has_module(name)
+            )
+            if whitener_active and (module._collect_bias or self.attribute_tokens):
+                raise NotImplementedError(
+                    "EK-FAC whitener is only supported with include_bias=False and "
+                    "attribute_tokens=False."
+                )
+
+            # a is projected in forward unless deferred by bias collection or whitener.
+            if p is not None and not module._collect_bias and not whitener_active:
                 g_projection = self.projection(name, p, o, "left", g.device, g.dtype)
                 g = g @ g_projection.T  # [N, S, p]
 
@@ -554,11 +577,16 @@ class HookCollectorBase(ContextDecorator, ABC):
                 P = P.flatten(2)  # [N, S, grad_dim]
                 P = P[self._current_valid_mask]  # [total_valid, grad_dim]
             else:
-                P = g.mT @ a  # [N, O/p, I/p]
+                P = g.mT @ a  # [N, O/p, I/p]  OR  [N, O, I] if whitener_active
                 if bias_grad is not None:
                     P = torch.cat([P, bias_grad.unsqueeze(2)], dim=2)  # [N, O, I+1]
                     i += 1
-                if p is not None and module._collect_bias:
+                if whitener_active:
+                    # Apply H^{-1/2} in [N, O, I] space, then double-sided project.
+                    P = self.ekfac_whitener.apply(name, P)
+                    if p is not None:
+                        P = self.double_sided_projection(name, P, g, p, o, i)
+                elif p is not None and module._collect_bias:
                     P = self.double_sided_projection(name, P, g, p, o, i)
 
         P = P.flatten(1).clamp_(self.lo, self.hi)

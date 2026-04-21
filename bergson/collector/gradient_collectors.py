@@ -12,6 +12,7 @@ from torch import Tensor
 from bergson.builder import Builder
 from bergson.collector.collector import HookCollectorBase
 from bergson.config import IndexConfig, PreprocessConfig
+from bergson.hessians.ekfac_whitener import EkfacWhitener
 from bergson.process_preconditioners import process_preconditioners
 from bergson.score.scorer import Scorer
 from bergson.utils.utils import get_gradient_dtype
@@ -61,6 +62,19 @@ class GradientCollector(HookCollectorBase):
             assert (
                 self.preprocess_cfg.aggregation == "none"
             ), "attribute_tokens is incompatible with reduce mode."
+
+        if self.cfg.ekfac_whitener_path:
+            if self.cfg.attribute_tokens or self.cfg.include_bias:
+                raise ValueError(
+                    "ekfac_whitener_path requires attribute_tokens=False and "
+                    "include_bias=False."
+                )
+            self.ekfac_whitener = EkfacWhitener(
+                factor_dir=self.cfg.ekfac_whitener_path,
+                device=self.model.device,
+                power=-0.5,
+                damp=self.cfg.ekfac_whitener_damp,
+            )
 
         self.save_dtype = get_gradient_dtype(self.model)
         self.lo = torch.finfo(self.save_dtype).min

@@ -413,6 +413,18 @@ class IndexConfig(AttributionConfig, Serializable):
     modules: list[str] = field(default_factory=list)
     """Modules to use for the query. If empty, all modules will be used."""
 
+    ekfac_whitener_path: str = ""
+    """When set, apply H^{-1/2} (from the EK-FAC factor directory at this path)
+    to per-sample gradients before random projection — the P-SIFT sketched
+    influence pipeline. Supported only with no normalizer, no bias, and
+    attribute_tokens=False. The factor dir must contain the standard
+    eigen_activation_sharded/, eigen_gradient_sharded/, and
+    eigenvalue_correction_sharded/ subdirectories produced by `approximate_hessians`."""
+
+    ekfac_whitener_damp: float = 0.1
+    """Damping factor for the EK-FAC whitener: scale = (lambda + damp * mean(lambda))^-0.5.
+    Matches the convention in sharded_computation._hadamard."""
+
     @property
     def partial_run_path(self) -> Path:
         """Temporary path to use while writing build artifacts."""
