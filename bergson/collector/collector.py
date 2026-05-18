@@ -97,7 +97,7 @@ class HookCollectorBase(ContextDecorator, ABC):
 
     ekfac_whitener: Optional[EkfacWhitener] = None
     """Optional EK-FAC whitener. When set, applies H^{-1/2} to per-sample grads
-    in their native [N, O, I] shape before random projection (P-SIFT sketch).
+    in their native [N, O, I] shape before random projection (sketch).
     For whitened modules, ``a`` is NOT pre-projected in the forward hook, and
     ``_compute_gradient`` materializes the full outer product before projecting
     both sides. Only supported for the no-normalizer, no-bias, doc-level path."""
@@ -552,8 +552,7 @@ class HookCollectorBase(ContextDecorator, ABC):
                 bias_grad = None
 
             whitener_active = (
-                self.ekfac_whitener is not None
-                and self.ekfac_whitener.has_module(name)
+                self.ekfac_whitener is not None and self.ekfac_whitener.has_module(name)
             )
             if whitener_active and (module._collect_bias or self.attribute_tokens):
                 raise NotImplementedError(

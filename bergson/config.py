@@ -415,7 +415,7 @@ class IndexConfig(AttributionConfig, Serializable):
 
     ekfac_whitener_path: str = ""
     """When set, apply H^{-1/2} (from the EK-FAC factor directory at this path)
-    to per-sample gradients before random projection — the P-SIFT sketched
+    to per-sample gradients before random projection — the sketched
     influence pipeline. Supported only with no normalizer, no bias, and
     attribute_tokens=False. The factor dir must contain the standard
     eigen_activation_sharded/, eigen_gradient_sharded/, and

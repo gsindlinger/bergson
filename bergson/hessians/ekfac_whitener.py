@@ -3,8 +3,7 @@ native [N, O, I] shape, using the layer-local Kronecker eigendecomposition
 produced by the EK-FAC Hessian fit.
 
 The same math powers ``bergson.hessians.apply_hessian`` with power=-1; here we
-parametrize the exponent so the same kernel computes H^{-1/2} (the P-SIFT
-whitening operator) and discards the disk round-trip by being applied
+parametrize the exponent so the same kernel computes H^{-1/2} (the whitening operator) and discards the disk round-trip by being applied
 on-the-fly inside the gradient-collection hook.
 
 Factor directory layout (produced by ``approximate_hessians``):
@@ -35,7 +34,7 @@ class EkfacWhitener:
         Device to load factors onto.
     power : float
         Matrix power to apply. Standard choices:
-          -0.5 : H^{-1/2}, two-sided whitening (P-SIFT).
+          -0.5 : H^{-1/2}, two-sided whitening.
           -1.0 : H^{-1}, one-sided (equivalent to existing apply_hessian).
     damp : float
         Damping factor added to eigenvalues before exponentiation:
@@ -76,7 +75,9 @@ class EkfacWhitener:
             self.scale[name] = damped.pow(self.power)
 
     @staticmethod
-    def _load_all_shards(factor_dir: Path) -> tuple[
+    def _load_all_shards(
+        factor_dir: Path,
+    ) -> tuple[
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],
@@ -84,11 +85,17 @@ class EkfacWhitener:
         eigen_a: dict[str, torch.Tensor] = {}
         eigen_g: dict[str, torch.Tensor] = {}
         lambda_factor: dict[str, torch.Tensor] = {}
-        for shard in sorted((factor_dir / "eigen_activation_sharded").glob("shard_*.safetensors")):
+        for shard in sorted(
+            (factor_dir / "eigen_activation_sharded").glob("shard_*.safetensors")
+        ):
             eigen_a.update(load_file(str(shard)))
-        for shard in sorted((factor_dir / "eigen_gradient_sharded").glob("shard_*.safetensors")):
+        for shard in sorted(
+            (factor_dir / "eigen_gradient_sharded").glob("shard_*.safetensors")
+        ):
             eigen_g.update(load_file(str(shard)))
-        for shard in sorted((factor_dir / "eigenvalue_correction_sharded").glob("shard_*.safetensors")):
+        for shard in sorted(
+            (factor_dir / "eigenvalue_correction_sharded").glob("shard_*.safetensors")
+        ):
             lambda_factor.update(load_file(str(shard)))
         if not eigen_a:
             raise FileNotFoundError(
