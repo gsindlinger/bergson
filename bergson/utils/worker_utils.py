@@ -360,13 +360,12 @@ def setup_data_pipeline(
         return tokenized, len(ds)
 
     max_token_bz = getattr(cfg, "token_batch_size", BIG_NUM)
-    if BIG_NUM > max_token_bz > max_model_length:
-        raise ValueError(
-            f"Token batch size {max_token_bz} exceeds model max length "
-            f"({max_model_length}). "
-            f"Use --token_batch_size {max_model_length} or smaller."
-        )
 
+    # token_batch_size serves as both the per-batch memory budget (max_len *
+    # n_seqs ≤ token_batch_size in allocate_batches) and the tokenization
+    # truncation length.  When token_batch_size > max_model_length the budget
+    # allows packing multiple sequences per pass while truncation is still
+    # clamped to max_model_length, so no error is needed here.
     max_length = min(max_model_length, max_token_bz)
     remove_columns = set(ds.column_names) if cfg.drop_columns else set()
     tokenize_cfg = data_cfg
