@@ -1,6 +1,7 @@
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Union, get_args
 
 from simple_parsing import ArgumentParser, ConflictResolution, Serializable
@@ -21,7 +22,7 @@ from .diagnose import DiagnoseConfig, diagnose
 from .hessians.hessian_approximations import approximate_hessians
 from .magic import MagicConfig, run_magic
 from .query.query_index import query
-from .score.score import score_dataset
+from .score.score import score_dataset, score_from_index
 from .trackstar import trackstar
 from .utils.worker_utils import validate_run_path
 
@@ -150,6 +151,39 @@ class Score(Serializable):
 
 
 @dataclass
+class Score_From_Index(Serializable):
+    """Score a prebuilt training gradient index against a query index.
+
+    No model inference required. Loads training gradients from disk in chunks,
+    scoring them against an existing query gradient index. Use this after
+    ``bergson build`` on the training corpus to avoid re-running the model for
+    each new query set.
+    """
+
+    train_index_path: str
+    """Path to the prebuilt training gradient index directory."""
+
+    out_path: str
+    """Output directory for the score memmap."""
+
+    score_cfg: ScoreConfig
+
+    preprocess_cfg: PreprocessConfig
+
+    train_chunk_size: int = 2048
+    """Training examples loaded per GPU step.  Tune to fit GPU memory."""
+
+    def execute(self):
+        score_from_index(
+            train_index_path=Path(self.train_index_path),
+            score_cfg=self.score_cfg,
+            preprocess_cfg=self.preprocess_cfg,
+            out_path=Path(self.out_path),
+            train_chunk_size=self.train_chunk_size,
+        )
+
+
+@dataclass
 class Trackstar(Serializable):
     """Run preconditioners, build, and score as a single pipeline."""
 
@@ -189,6 +223,7 @@ class Main:
         Query,
         Reduce,
         Score,
+        Score_From_Index,
         Trackstar,
         Test_Model_Configuration,
     ]

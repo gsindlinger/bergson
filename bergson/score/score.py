@@ -455,3 +455,146 @@ def score_dataset(
 
     if index_cfg.distributed.rank == 0:
         shutil.move(index_cfg.partial_run_path, index_cfg.run_path)
+
+
+def score_from_index(
+    train_index_path: Path,
+    score_cfg: ScoreConfig,
+    preprocess_cfg: PreprocessConfig,
+    out_path: Path,
+    *,
+    train_chunk_size: int = 2048,
+    device: torch.device | None = None,
+) -> None:
+    """Score a prebuilt training gradient index against a query index.
+
+    No model inference required. Loads training gradients from disk in chunks
+    of ``train_chunk_size`` rows to bound peak GPU memory.
+
+    The training index must already have any per-parameter normalisation (e.g.
+    Adam second-moment correction for TrackStar) baked in at build time via
+    ``IndexConfig.processor_path``.  Any Hessian preconditioner
+    (``preprocess_cfg.preconditioner_path``) is applied on-the-fly to each
+    chunk, identical to how ``score_dataset`` applies it.
+
+    Parameters
+    ----------
+    train_index_path:
+        Directory of the prebuilt training gradient index (contains
+        ``gradients.bin`` and ``info.json``).
+    score_cfg:
+        Score config; ``query_path`` must point to an existing query index.
+        ``modules`` is inferred from the training index if empty.
+    preprocess_cfg:
+        Preprocessing config (``unit_normalize``, ``preconditioner_path``).
+        Applied identically to the model-based scoring path.
+    out_path:
+        Output directory.  Written atomically via a ``.part`` sibling.
+    train_chunk_size:
+        Number of training examples loaded into GPU memory per step.
+    device:
+        Target device.  Defaults to ``cuda:0`` if available, else ``cpu``.
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    dtype = convert_precision_to_torch(score_cfg.precision)
+
+    # ── Load training index metadata ──────────────────────────────────────
+    with open(train_index_path / "info.json") as f:
+        train_info = json.load(f)
+    train_grad_sizes: dict[str, int] = train_info["grad_sizes"]
+    n_train: int = train_info["num_grads"]
+
+    module_names = list(train_grad_sizes.keys())
+    mod_sizes = list(train_grad_sizes.values())
+    mod_offsets = [0] + list(np.cumsum(mod_sizes))
+
+    if not score_cfg.modules:
+        score_cfg.modules = module_names
+
+    # Memory-mapped view of training gradients — no RAM cost until accessed.
+    train_mmap = load_gradients(train_index_path, structured=False)
+    needs_cast = not np.issubdtype(train_mmap.dtype, np.floating)
+
+    # ── Set up query side (reuses create_scorer internals) ────────────────
+    partial_out = Path(str(out_path) + ".part")
+    partial_out.mkdir(parents=True, exist_ok=True)
+
+    query_grads, query_preprocess_cfg, grad_shapes = get_query_grads(score_cfg)
+
+    preconditioners = get_trackstar_preconditioner(
+        preprocess_cfg.preconditioner_path,
+        device=device,
+        power=-0.5 if preprocess_cfg.unit_normalize else -1,
+        return_dtype=dtype,
+    )
+
+    if preconditioners and not bool(query_preprocess_cfg.preconditioner_path):
+        query_grads = {
+            m: query_grads[m].to(device=device, dtype=dtype) @ preconditioners[m]
+            for m in score_cfg.modules
+        }
+
+    index_transform = (
+        _make_split_preconditioner(preconditioners, score_cfg.modules, device, dtype)
+        if preconditioners and preprocess_cfg.unit_normalize
+        else lambda x: x
+    )
+
+    unit_normalize = (
+        False if query_preprocess_cfg.unit_normalize else preprocess_cfg.unit_normalize
+    )
+    aggregation = (
+        "none"
+        if query_preprocess_cfg.aggregation != "none"
+        else preprocess_cfg.aggregation
+    )
+    normalize_aggregated_grad = (
+        False
+        if query_preprocess_cfg.normalize_aggregated_grad
+        else preprocess_cfg.normalize_aggregated_grad
+    )
+    query_grads = normalize_and_aggregate_grads(
+        query_grads,
+        score_cfg.modules,
+        unit_normalize=unit_normalize,
+        device=device,
+        aggregate_grads=aggregation,
+        normalize_aggregated_grad=normalize_aggregated_grad,
+    )
+
+    n_queries = len(query_grads[score_cfg.modules[0]])
+    writer = MemmapSequenceScoreWriter(partial_out, n_train, n_queries, dtype=dtype)
+
+    scorer = Scorer(
+        query_grads=query_grads,
+        modules=score_cfg.modules,
+        writer=writer,
+        device=device,
+        dtype=dtype,
+        unit_normalize=preprocess_cfg.unit_normalize,
+        score_mode=score_cfg.score,
+        attribute_tokens=False,
+        index_transform=index_transform,
+        low_rank=score_cfg.query_low_rank,
+        grad_shapes=grad_shapes,
+    )
+
+    # ── Iterate training chunks ───────────────────────────────────────────
+    for start in tqdm(range(0, n_train, train_chunk_size), desc="Scoring from index"):
+        end = min(start + train_chunk_size, n_train)
+        chunk_np = train_mmap[start:end]
+        if needs_cast:
+            chunk_np = chunk_np.astype(np.float32)
+        chunk_t = torch.from_numpy(chunk_np.copy()).to(device, dtype)
+
+        mod_grads = {
+            name: chunk_t[:, mod_offsets[i] : mod_offsets[i + 1]]
+            for i, name in enumerate(module_names)
+            if name in score_cfg.modules
+        }
+        scorer(list(range(start, end)), mod_grads)
+
+    writer.flush()
+    shutil.move(str(partial_out), str(out_path))
