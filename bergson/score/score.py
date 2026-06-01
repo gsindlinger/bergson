@@ -24,6 +24,7 @@ from bergson.process_grads import (
 from bergson.score.score_writer import (
     MemmapSequenceScoreWriter,
     MemmapTokenScoreWriter,
+    ScoreWriter,
 )
 from bergson.score.scorer import Scorer
 from bergson.utils.utils import (
@@ -151,6 +152,7 @@ def create_scorer(
     row_range: tuple[int, int] | None = None,
     column_offset: int = 0,
     total_num_scores: int | None = None,
+    writer: ScoreWriter | None = None,
 ) -> Scorer:
     """Create a Scorer with MemmapScoreWriter for disk-based scoring.
 
@@ -175,6 +177,10 @@ def create_scorer(
     total_num_scores : int | None
         Total number of score columns in the output memmap. Defaults to the
         number of query grads loaded (i.e. the non-chunked case).
+    writer : ScoreWriter | None
+        If provided, use this writer instead of creating a
+        MemmapSequenceScoreWriter. path, data, attribute_tokens,
+        column_offset, and total_num_scores are ignored.
     """
     query_grads, query_preprocess_cfg, grad_shapes = get_query_grads(
         score_cfg, row_range=row_range
@@ -233,24 +239,25 @@ def create_scorer(
     )
 
     num_queries = len(query_grads[score_cfg.modules[0]])
-    if attribute_tokens:
-        writer = MemmapTokenScoreWriter(
-            path,
-            data,
-            num_queries,
-            dtype=dtype,
-            column_offset=column_offset,
-            total_num_scores=total_num_scores,
-        )
-    else:
-        writer = MemmapSequenceScoreWriter(
-            path,
-            len(data),
-            num_queries,
-            dtype=dtype,
-            column_offset=column_offset,
-            total_num_scores=total_num_scores,
-        )
+    if writer is None:
+        if attribute_tokens:
+            writer = MemmapTokenScoreWriter(
+                path,
+                data,
+                num_queries,
+                dtype=dtype,
+                column_offset=column_offset,
+                total_num_scores=total_num_scores,
+            )
+        else:
+            writer = MemmapSequenceScoreWriter(
+                path,
+                len(data),
+                num_queries,
+                dtype=dtype,
+                column_offset=column_offset,
+                total_num_scores=total_num_scores,
+            )
 
     return Scorer(
         query_grads=query_grads,
@@ -598,3 +605,69 @@ def score_from_index(
 
     writer.flush()
     shutil.move(str(partial_out), str(out_path))
+
+
+def score_dataset_streaming(
+    index_cfg: IndexConfig,
+    score_cfg: ScoreConfig,
+    preprocess_cfg: PreprocessConfig,
+    writer: ScoreWriter,
+) -> None:
+    """Score a dataset against a query index, writing results to a custom writer.
+
+    Like score_dataset but bypasses all disk-based memmap output — scores are
+    passed directly to *writer* batch by batch. Single-GPU only (no distributed
+    support). Use this to avoid writing large (N_train × 2m) score files.
+
+    Parameters
+    ----------
+    index_cfg : IndexConfig
+        Model, tokenizer, and data settings. ``run_path`` is ignored.
+    score_cfg : ScoreConfig
+        Query index path and scoring mode.
+    preprocess_cfg : PreprocessConfig
+        Normalization / preconditioner settings.
+    writer : ScoreWriter
+        Receives ``(indices, scores)`` for each gradient batch.
+    """
+    ds, _ = setup_data_pipeline(index_cfg)
+    if not isinstance(ds, Dataset):
+        raise TypeError(
+            "score_dataset_streaming requires a Dataset, not IterableDataset"
+        )
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model, target_modules = setup_model_and_peft(index_cfg)
+    score_dtype = (
+        convert_precision_to_torch(score_cfg.precision)
+        if score_cfg.precision != "auto"
+        else get_gradient_dtype(model)
+    )
+    processor = create_processor(model, index_cfg, target_modules)
+    attention_cfgs = {
+        module: index_cfg.attention for module in index_cfg.split_attention_modules
+    }
+    batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)
+
+    scorer = create_scorer(
+        Path("."),  # unused — writer is provided
+        ds,
+        score_cfg,
+        preprocess_cfg,
+        device=device,
+        dtype=score_dtype,
+        attribute_tokens=index_cfg.attribute_tokens,
+        writer=writer,
+    )
+
+    collect_gradients(
+        model=model,
+        data=ds,
+        processor=processor,
+        cfg=index_cfg,
+        target_modules=target_modules,
+        attention_cfgs=attention_cfgs,
+        batches=batches,
+        scorer=scorer,
+    )
+    writer.flush()
