@@ -251,6 +251,7 @@ def compute_eigendecomposition(
     keys_for_this_rank = all_assignments[rank]
 
     covariance_eigenvectors = {}
+    covariance_eigenvalues = {}
 
     for key in tqdm(
         keys_for_this_rank,
@@ -284,6 +285,7 @@ def compute_eigendecomposition(
         # TODO: Maybe possible to avoid CPU transfer here?
         eigenvectors = eigenvectors.to(original_dtype).to(device="cpu").contiguous()
         covariance_eigenvectors[key] = eigenvectors
+        covariance_eigenvalues[key] = eigenvalues.to(original_dtype).to(device="cpu").contiguous()
 
     # Merge eigenvectors across ranks and re-shard for output
     covariance_eigenvectors = _merge_and_shard_eigenvectors(
@@ -299,17 +301,24 @@ def compute_eigendecomposition(
     dirname = os.path.dirname(covariance_path)
     basename = os.path.basename(covariance_path)
     output_path = os.path.join(dirname, "eigen_" + basename)
+    eigvals_path = os.path.join(dirname, "eigval_" + basename)
 
     os.makedirs(output_path, exist_ok=True)
+    os.makedirs(eigvals_path, exist_ok=True)
 
     save_file(
         covariance_eigenvectors,
         os.path.join(output_path, f"shard_{rank}.safetensors"),
     )
+    save_file(
+        covariance_eigenvalues,
+        os.path.join(eigvals_path, f"shard_{rank}.safetensors"),
+    )
 
     gc.collect()
 
     get_logger().info(f"Saved eigenvectors to {output_path}")
+    get_logger().info(f"Saved eigenvalues to {eigvals_path}")
 
 
 def _merge_and_shard_eigenvectors(

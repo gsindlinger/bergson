@@ -12,6 +12,7 @@ from torch import Tensor
 from bergson.builder import Builder
 from bergson.collector.collector import HookCollectorBase
 from bergson.config import IndexConfig, PreprocessConfig
+from bergson.hessians.apply_hessian import load_kfac_projections
 from bergson.hessians.ekfac_whitener import EkfacWhitener
 from bergson.process_preconditioners import process_preconditioners
 from bergson.score.scorer import Scorer
@@ -79,6 +80,15 @@ class GradientCollector(HookCollectorBase):
         self.save_dtype = get_gradient_dtype(self.model)
         self.lo = torch.finfo(self.save_dtype).min
         self.hi = torch.finfo(self.save_dtype).max
+
+        if self.cfg.kfac_projection_path:
+            load_kfac_projections(
+                self.cfg.kfac_projection_path,
+                self.processor._projection_matrices,
+                self.target_info.keys(),
+                device=self.model.device,
+                dtype=self.save_dtype,
+            )
 
         self.per_doc_losses = torch.full(
             (len(self.data),),

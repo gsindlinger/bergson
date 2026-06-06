@@ -425,6 +425,14 @@ class IndexConfig(AttributionConfig, Serializable):
     """Damping factor for the EK-FAC whitener: scale = (lambda + damp * mean(lambda))^-0.5.
     Matches the convention in sharded_computation._hadamard."""
 
+    kfac_projection_path: str = ""
+    """Path to a K-FAC hessian directory containing precomputed modified
+    projection matrices (``projection_left_sharded/``,
+    ``projection_right_sharded/``). When set, the gradient collector loads
+    these instead of sampling fresh random projections — the saved matrices
+    are ``M = R · cov^{-1/2}``, so applying them to gradients yields
+    preconditioned-and-sketched gradients in a single matmul (P-SIFT)."""
+
     @property
     def partial_run_path(self) -> Path:
         """Temporary path to use while writing build artifacts."""
