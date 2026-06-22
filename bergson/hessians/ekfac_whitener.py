@@ -43,6 +43,16 @@ class EkfacWhitener:
         ``sharded_computation._hadamard``).
     dtype : torch.dtype
         Compute dtype for the factors. float32 recommended.
+
+    Notes
+    -----
+    If ``factor_dir`` has no ``eigenvalue_correction_sharded/`` (the Hessian
+    was fit with ``ev_correction=False``, plain K-FAC), ``lambda`` falls back
+    to the uncorrected outer product of the per-side covariance eigenvalues,
+    ``E_G ⊗ E_A``, scaled by the sample count so it matches the units of the
+    real (summed, not averaged) eigenvalue correction. This only needs files
+    that K-FAC fitting always writes (``eigval_activation_sharded``,
+    ``eigval_gradient_sharded``, ``total_processed.pt``).
     """
 
     def __init__(
@@ -58,7 +68,10 @@ class EkfacWhitener:
         self.damp = damp
         self.dtype = dtype
 
-        eigen_a, eigen_g, lambda_factor = self._load_all_shards(Path(factor_dir))
+        factor_dir = Path(factor_dir)
+        eigen_a, eigen_g, lambda_factor = self._load_all_shards(factor_dir)
+        if not lambda_factor:
+            lambda_factor = self._uncorrected_lambda(factor_dir)
 
         self.eigen_a: dict[str, torch.Tensor] = {
             k: v.to(device=self.device, dtype=self.dtype) for k, v in eigen_a.items()
@@ -103,6 +116,34 @@ class EkfacWhitener:
                 f"eigen_activation_sharded/shard_*.safetensors etc."
             )
         return eigen_a, eigen_g, lambda_factor
+
+    @staticmethod
+    def _uncorrected_lambda(factor_dir: Path) -> dict[str, torch.Tensor]:
+        """Plain K-FAC stand-in for Lambda when no eigenvalue correction was
+        computed: Lambda[o, i] ≈ E_G[o] * E_A[i] * total_processed.
+
+        total_processed rescales the outer product of the (sample-count
+        normalized) per-side eigenvalues back to the same units as the real
+        eigenvalue correction, which accumulates a raw sum over the dataset
+        rather than an average.
+        """
+        eigval_a: dict[str, torch.Tensor] = {}
+        eigval_g: dict[str, torch.Tensor] = {}
+        for shard in sorted(
+            (factor_dir / "eigval_activation_sharded").glob("shard_*.safetensors")
+        ):
+            eigval_a.update(load_file(str(shard)))
+        for shard in sorted(
+            (factor_dir / "eigval_gradient_sharded").glob("shard_*.safetensors")
+        ):
+            eigval_g.update(load_file(str(shard)))
+        total_processed = torch.load(
+            factor_dir / "total_processed.pt", map_location="cpu", weights_only=False
+        )
+        return {
+            name: torch.outer(eigval_g[name], eigval_a[name]) * total_processed
+            for name in eigval_a
+        }
 
     def has_module(self, name: str) -> bool:
         return name in self.eigen_a

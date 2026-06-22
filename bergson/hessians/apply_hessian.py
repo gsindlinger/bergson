@@ -186,6 +186,32 @@ class EkfacApplicator:
             return self._apply_compressed()
         return self._apply_legacy()
 
+    def _uncorrected_lambda(self, names) -> dict[str, Tensor]:
+        """Plain K-FAC stand-in for Lambda when no eigenvalue correction was
+        computed: Lambda[o, i] ≈ E_G[o] * E_A[i] * total_processed. Gathers
+        eigenvalues across all shards since they aren't redistributed by
+        rank the way eigen_{activation,gradient}_sharded are.
+        """
+        eigval_a: dict[str, Tensor] = {}
+        eigval_g: dict[str, Tensor] = {}
+        for shard in sorted(
+            Path(self.path, "eigval_activation_sharded").glob("shard_*.safetensors")
+        ):
+            eigval_a.update(load_file(str(shard), device=self.device))
+        for shard in sorted(
+            Path(self.path, "eigval_gradient_sharded").glob("shard_*.safetensors")
+        ):
+            eigval_g.update(load_file(str(shard), device=self.device))
+        total_processed = torch.load(
+            Path(self.path, "total_processed.pt"),
+            map_location=self.device,
+            weights_only=False,
+        )
+        return {
+            name: torch.outer(eigval_g[name], eigval_a[name]) * total_processed
+            for name in names
+        }
+
     def _apply_compressed(self):
         """Apply M_left · G_q · M_rightᵀ to the saved query gradients.
 
@@ -248,10 +274,17 @@ class EkfacApplicator:
             self.path + f"/eigen_gradient_sharded/shard_{self.rank}.safetensors",
             device=f"cuda:{self.rank}",
         )
-        lambda_factor = load_file(
-            self.path + f"/eigenvalue_correction_sharded/shard_{self.rank}.safetensors",
-            device=f"cuda:{self.rank}",
+        correction_shard = Path(
+            self.path + f"/eigenvalue_correction_sharded/shard_{self.rank}.safetensors"
         )
+        if correction_shard.exists():
+            lambda_factor = load_file(str(correction_shard), device=f"cuda:{self.rank}")
+        else:
+            # Plain K-FAC (no eigenvalue correction): fall back to the
+            # uncorrected outer product of the per-side eigenvalues, which
+            # K-FAC fitting always writes. See EkfacWhitener._uncorrected_lambda
+            # for the same formula used by the sketched-whitener path.
+            lambda_factor = self._uncorrected_lambda(eigen_a.keys())
 
         for k, v in lambda_factor.items():
             eigen_a[k] = eigen_a[k].to(dtype=torch.float32)
