@@ -191,6 +191,7 @@ def allocate_batches(
     doc_lengths: list[int],
     N: int,
     seed: int = 42,
+    max_batch_size: int | None = None,
 ) -> list[list[int]]:
     """
     Allocate documents into batches that are then distributed evenly across
@@ -229,7 +230,9 @@ def allocate_batches(
     """
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
-    (batches,) = _allocate_batches_world(doc_lengths, N, world_size, seed, ranks=[rank])
+    (batches,) = _allocate_batches_world(
+        doc_lengths, N, world_size, seed, ranks=[rank], max_batch_size=max_batch_size
+    )
     return batches
 
 
@@ -239,6 +242,7 @@ def _allocate_batches_world(
     world_size: int,
     seed: int = 42,
     ranks: list[int] | None = None,
+    max_batch_size: int | None = None,
 ) -> list[list[list[int]]]:
     """Lower-level version of allocate_batches that returns batches for specified ranks.
 
@@ -286,7 +290,10 @@ def _allocate_batches_world(
         else:
             # Check if adding this document would exceed the budget
             new_cost = max(length, doc_lengths[cur_batch[0]]) * (len(cur_batch) + 1)
-            if new_cost <= N:
+            within_count = (
+                max_batch_size is None or len(cur_batch) + 1 <= max_batch_size
+            )
+            if new_cost <= N and within_count:
                 # It fits, so add it to the current batch
                 cur_batch.append(idx)
             else:

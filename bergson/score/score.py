@@ -345,7 +345,9 @@ def score_worker(
 
     if isinstance(ds, Dataset):
         kwargs["batches"] = allocate_batches(
-            ds["length"][:], index_cfg.token_batch_size
+            ds["length"][:],
+            index_cfg.token_batch_size,
+            max_batch_size=index_cfg.max_batch_size,
         )
 
         n_queries = _peek_n_queries(score_cfg.query_path)
@@ -398,7 +400,9 @@ def score_worker(
                 return
             ds_shard = assert_type(Dataset, Dataset.from_list(buf))
             batches = allocate_batches(
-                ds_shard["length"][:], index_cfg.token_batch_size
+                ds_shard["length"][:],
+                index_cfg.token_batch_size,
+                max_batch_size=index_cfg.max_batch_size,
             )
             kwargs["ds"] = ds_shard
             kwargs["batches"] = batches
@@ -647,7 +651,9 @@ def score_dataset_streaming(
     attention_cfgs = {
         module: index_cfg.attention for module in index_cfg.split_attention_modules
     }
-    batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)
+    batches = allocate_batches(
+        ds["length"][:], index_cfg.token_batch_size, max_batch_size=index_cfg.max_batch_size
+    )
 
     scorer = create_scorer(
         Path("."),  # unused — writer is provided

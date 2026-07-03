@@ -348,6 +348,9 @@ class IndexConfig(AttributionConfig, Serializable):
     token_batch_size: int = 2048
     """Batch size in tokens for building the index."""
 
+    max_batch_size: int | None = None
+    """Cap the number of documents per batch."""
+
     auto_batch_size: bool = False
     """Whether to automatically determine the optimal token batch size.
     Experimental feature only enabled for `build`."""

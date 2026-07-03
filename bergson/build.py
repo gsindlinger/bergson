@@ -84,7 +84,11 @@ def build_worker(
     }
 
     if isinstance(ds, Dataset):
-        batches = allocate_batches(ds["length"][:], index_cfg.token_batch_size)
+        batches = allocate_batches(
+            ds["length"][:],
+            index_cfg.token_batch_size,
+            max_batch_size=index_cfg.max_batch_size,
+        )
         kwargs["batches"] = batches
         collect_gradients(**kwargs)
     else:
@@ -97,7 +101,9 @@ def build_worker(
                 return
             ds_shard = assert_type(Dataset, Dataset.from_list(buf))
             batches = allocate_batches(
-                ds_shard["length"][:], index_cfg.token_batch_size
+                ds_shard["length"][:],
+                index_cfg.token_batch_size,
+                max_batch_size=index_cfg.max_batch_size,
             )
             kwargs["ds"] = ds_shard
             kwargs["batches"] = batches
